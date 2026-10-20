@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { after, test } from 'node:test'
 import { randomUUID } from 'node:crypto'
-import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFile } from 'node:child_process'
@@ -451,7 +451,7 @@ test(
 
 test('Codex adapter refresh preserves native disables, MCP entries and unrelated TOML settings', async () => {
   const home = await mkdtemp(join(tmpdir(), 'codex-settings-'))
-  const fixture = sandboxFixture()
+  let fixture = sandboxFixture()
   const execute = promisify(execFile)
   const runCommand = async (input: string | { cmd: string; args: string[] }, args: string[] = []) => {
     if (input === 'node') {
@@ -485,6 +485,34 @@ test('Codex adapter refresh preserves native disables, MCP entries and unrelated
     delete servers['secondary-search']
     delete saved.experimental_use_rmcp_client
     assert.deepEqual(disconnected, parseToml(stringifyToml(saved)))
+    const nativeModel = { ...disconnected, model: 'saved-model' }
+    await writeFile(location, stringifyToml(nativeModel))
+    await rm(`${location}.coding-agent-template.json`, { force: true })
+    const bin = join(home, 'bin')
+    await mkdir(bin)
+    const argumentsFile = join(home, 'arguments.json')
+    const sentinel = join(home, 'unexpected-shell-effect')
+    await writeFile(
+      join(bin, 'codex'),
+      `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(argumentsFile)},JSON.stringify(process.argv.slice(2)))`,
+      { mode: 0o755 },
+    )
+    fixture = sandboxFixture(async (_command, raw) => {
+      const result = await execute(
+        raw.cmd,
+        raw.args.map((arg) => arg.replaceAll('/vercel/sandbox/project', home)),
+        {
+          env: { PATH: `${bin}:${process.env.PATH}`, NODE_ENV: 'test' },
+        },
+      )
+      return { code: 0, output: result.stdout, error: result.stderr }
+    })
+    const selected = `gpt-5'$(touch ${sentinel})`
+    assert.equal((await executeCodexInSandbox(sandbox, 'Select a model', logger, selected, [])).success, true)
+    const argumentsList = JSON.parse(await readFile(argumentsFile, 'utf8')) as string[]
+    assert.equal(argumentsList[argumentsList.indexOf('--model') + 1], selected)
+    assert.equal(parseToml(await readFile(location, 'utf8')).model, 'saved-model')
+    await assert.rejects(readFile(sentinel), { code: 'ENOENT' })
     await writeFile(location, 'invalid = [')
     assert.equal((await writeCodexConfiguration(sandbox, 'model = "gpt-5"')).success, false)
     assert.equal(await readFile(location, 'utf8'), 'invalid = [')

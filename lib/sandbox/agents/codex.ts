@@ -299,15 +299,15 @@ url = "${server.baseUrl}"
       }
     }
 
-    const logCommand = `${codexCommand} "${instruction}"`
+    if (selectedModel) {
+      const quotedModel = `'${selectedModel.replace(/'/g, "'\\''")}'`
+      codexCommand += ` --model ${quotedModel}`
+    }
 
-    await logger.command(logCommand)
+    await logger.command('Executing Codex CLI')
     if (logger) {
-      await logger.command(logCommand)
-      const providerName = isVercelKey ? 'Vercel AI Gateway' : 'OpenAI API'
-      await logger.info(
-        `Executing Codex with model ${modelToUse} via ${providerName} and bypassed sandbox restrictions`,
-      )
+      await logger.command('Executing Codex CLI')
+      await logger.info('Executing Codex with configured model and provider')
     }
 
     // Use the same pattern as other working agents (Claude, etc.)

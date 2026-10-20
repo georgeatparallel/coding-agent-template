@@ -1,3 +1,4 @@
+import { writeCodexConfiguration } from '../codex-config'
 import { Sandbox } from '@vercel/sandbox'
 import { runCommandInSandbox, runInProject, PROJECT_DIR } from '../commands'
 import { AgentExecutionResult } from '../types'
@@ -245,13 +246,15 @@ url = "${server.baseUrl}"
       await logger.info('Creating Codex configuration file...')
     }
 
-    const configSetupResult = await sandbox.runCommand({
-      cmd: 'sh',
-      args: ['-c', `mkdir -p ~/.codex && cat > ~/.codex/config.toml << 'EOF'\n${configToml}EOF`],
-      env: {},
-      sudo: false,
-      cwd: PROJECT_DIR,
-    })
+    const configSetupResult = await writeCodexConfiguration(sandbox, configToml)
+    if (!configSetupResult.success) {
+      return {
+        success: false,
+        error: 'Failed to refresh Codex configuration',
+        cliName: 'codex',
+        changesDetected: false,
+      }
+    }
 
     if (logger) {
       await logger.info('Codex config setup completed')

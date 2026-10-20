@@ -8,6 +8,8 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { createServer } from 'node:http'
 import { writeMcpConfiguration } from '../lib/sandbox/mcp-config'
+import { writeCodexConfiguration } from '../lib/sandbox/codex-config'
+import { parse as parseToml, stringify as stringifyToml } from 'smol-toml'
 import { Writable } from 'node:stream'
 import type { Sandbox } from '@vercel/sandbox'
 import type { Connector } from '../lib/db/schema'
@@ -76,12 +78,17 @@ export function sandboxFixture(
     const config = command.match(/<< 'EOF'\n([\s\S]*?)\n?EOF/)
     if (config) configs.push(config[1])
     if (typeof input === 'string' && input === 'node' && args[0] === '-e') {
-      configs.push(args.at(-1)!)
-      writes.push(args)
+      if (args[1].includes('const [config,pending,owned]')) configs.push(args[2])
+      else if (!args[1].includes('read(file),read(marker)')) {
+        configs.push(args.at(-1)!)
+        writes.push(args)
+      }
     }
     let code = 0
     let output = command.includes('which') ? 'claude codex copilot cursor-agent gemini opencode' : ''
     let error = ''
+    if (typeof input === 'string' && input === 'node' && args[1]?.includes('read(file),read(marker)'))
+      output = JSON.stringify({ config: null, ownership: null })
     if (command.includes('codex exec') || command.includes('codex resume')) {
       if (onExecution)
         ({ code, output, error } = await onExecution(
@@ -441,3 +448,47 @@ test(
     }
   },
 )
+
+test('Codex adapter refresh preserves native disables, MCP entries and unrelated TOML settings', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'codex-settings-'))
+  const fixture = sandboxFixture()
+  const execute = promisify(execFile)
+  const runCommand = async (input: string | { cmd: string; args: string[] }, args: string[] = []) => {
+    if (input === 'node') {
+      try {
+        const result = await execute('node', args, { env: { PATH: process.env.PATH, HOME: home, NODE_ENV: 'test' } })
+        return { exitCode: 0, stdout: async () => result.stdout, stderr: async () => result.stderr }
+      } catch {
+        return { exitCode: 1, stdout: async () => '', stderr: async () => '' }
+      }
+    }
+    return typeof input === 'string' ? fixture.sandbox.runCommand(input, args) : fixture.sandbox.runCommand(input)
+  }
+  const sandbox = { runCommand } as unknown as Sandbox
+  const { logger } = loggerFixture()
+  const secondary = { ...connector, name: 'Secondary Search' }
+  try {
+    const first = await executeCodexInSandbox(sandbox, 'Find docs', logger, 'gpt-5', [connector, secondary])
+    assert.equal(first.success, true)
+    const location = join(home, '.codex/config.toml')
+    const saved = parseToml(await readFile(location, 'utf8'))
+    const servers = saved.mcp_servers as Record<string, Record<string, unknown>>
+    servers['parallel-search'].enabled = false
+    servers.native = { url: 'https://native.example/mcp', enabled: false }
+    saved.web_search = 'disabled'
+    saved.approval_policy = 'untrusted'
+    await writeFile(location, stringifyToml(saved))
+    await executeCodexInSandbox(sandbox, 'Continue', logger, 'gpt-5', [connector, secondary], true)
+    assert.deepEqual(parseToml(await readFile(location, 'utf8')), parseToml(stringifyToml(saved)))
+    await executeCodexInSandbox(sandbox, 'Continue without app connectors', logger, 'gpt-5', [], true)
+    const disconnected = parseToml(await readFile(location, 'utf8'))
+    delete servers['secondary-search']
+    delete saved.experimental_use_rmcp_client
+    assert.deepEqual(disconnected, parseToml(stringifyToml(saved)))
+    await writeFile(location, 'invalid = [')
+    assert.equal((await writeCodexConfiguration(sandbox, 'model = "gpt-5"')).success, false)
+    assert.equal(await readFile(location, 'utf8'), 'invalid = [')
+  } finally {
+    await rm(home, { recursive: true, force: true })
+  }
+})

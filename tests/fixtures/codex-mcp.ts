@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { spawn, execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import { parse as parseToml, stringify as stringifyToml } from 'smol-toml'
 import { PARALLEL_SEARCH_URL } from '../../lib/connectors/parallel-search'
 
 type Mode = 'normal' | 'error' | 'timeout' | 'cancel' | 'disabled'
@@ -172,14 +173,16 @@ export async function runCodexMcp(config: string, command: { cmd: string; args: 
     await mkdir(project)
     execFileSync('git', ['init', '-q', project])
     // Inference and search are separate. A dummy model key is never sent to MCP.
-    const fixtureConfig = config
-      .replace('https://api.openai.com/v1', modelUrl)
-      .replace('https://ai-gateway.vercel.sh/codex/v1', modelUrl)
-      .replace(PARALLEL_SEARCH_URL, live ? PARALLEL_SEARCH_URL : `${mcpUrl}/mcp`)
-    await writeFile(
-      join(home, '.codex/config.toml'),
-      `${fixtureConfig}\ntool_timeout_sec = ${live ? 30 : 1}\n${mode === 'disabled' ? 'enabled = false\n' : ''}`,
+    const fixtureConfig = parseToml(
+      config
+        .replace('https://api.openai.com/v1', modelUrl)
+        .replace('https://ai-gateway.vercel.sh/codex/v1', modelUrl)
+        .replace(PARALLEL_SEARCH_URL, live ? PARALLEL_SEARCH_URL : `${mcpUrl}/mcp`),
     )
+    const servers = fixtureConfig.mcp_servers as Record<string, Record<string, unknown>>
+    servers['parallel-search'].tool_timeout_sec = live ? 30 : 1
+    if (mode === 'disabled') servers['parallel-search'].enabled = false
+    await writeFile(join(home, '.codex/config.toml'), stringifyToml(fixtureConfig))
     const binary = process.env.CODEX_BIN!
     const args = command.args.map((arg) =>
       arg.replaceAll('/vercel/sandbox/project', project).replaceAll('/home/vercel-sandbox', home),

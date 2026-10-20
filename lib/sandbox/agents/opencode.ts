@@ -1,3 +1,4 @@
+import { parallelSearchHeaders } from '@/lib/connectors/parallel-search'
 import { Sandbox } from '@vercel/sandbox'
 import { runCommandInSandbox, runInProject, PROJECT_DIR } from '../commands'
 import { AgentExecutionResult } from '../types'
@@ -146,8 +147,8 @@ export async function executeOpenCodeInSandbox(
       await logger.success('OpenCode CLI verified successfully')
     }
 
-    // Configure MCP servers if provided
-    if (mcpServers && mcpServers.length > 0) {
+    // Refresh even an empty selection so disconnected servers do not survive a follow-up.
+    if (mcpServers !== undefined) {
       await logger.info('Configuring MCP servers')
 
       // Create OpenCode opencode.json configuration file
@@ -197,7 +198,7 @@ export async function executeOpenCodeInSandbox(
           }
 
           // Build headers object
-          const headers: Record<string, string> = {}
+          const headers: Record<string, string> = parallelSearchHeaders(server.baseUrl)
           if (server.oauthClientSecret) {
             headers.Authorization = `Bearer ${server.oauthClientSecret}`
           }

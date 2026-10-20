@@ -1,3 +1,4 @@
+import { parallelSearchHeaders } from '@/lib/connectors/parallel-search'
 import { Sandbox } from '@vercel/sandbox'
 import { runCommandInSandbox, runInProject, PROJECT_DIR } from '../commands'
 import { AgentExecutionResult } from '../types'
@@ -99,8 +100,8 @@ export async function executeCopilotInSandbox(
       }
     }
 
-    // Configure MCP servers if provided
-    if (mcpServers && mcpServers.length > 0) {
+    // Refresh even an empty selection so disconnected servers do not survive a follow-up.
+    if (mcpServers !== undefined) {
       await logger.info('Configuring MCP servers for GitHub Copilot')
 
       // Create MCP configuration file for Copilot
@@ -143,7 +144,7 @@ export async function executeCopilotInSandbox(
           await logger.info('Added local MCP server')
         } else {
           // Remote HTTP/SSE server
-          const headers: Record<string, string> = {}
+          const headers: Record<string, string> = parallelSearchHeaders(server.baseUrl)
           if (server.oauthClientSecret) {
             headers.Authorization = `Bearer ${server.oauthClientSecret}`
           }

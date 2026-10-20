@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict'
 import { after, test } from 'node:test'
 import { randomUUID } from 'node:crypto'
+import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+import { createServer } from 'node:http'
+import { writeMcpConfiguration } from '../lib/sandbox/mcp-config'
 import { Writable } from 'node:stream'
 import type { Sandbox } from '@vercel/sandbox'
 import type { Connector } from '../lib/db/schema'
@@ -61,12 +68,17 @@ export function sandboxFixture(
 ) {
   const commands: string[] = []
   const configs: string[] = []
+  const writes: string[][] = []
   const runCommand = async (input: string | Command, args: string[] = []) => {
     const command =
       typeof input === 'string' ? [input, ...args].join(' ') : [input.cmd, ...(input.args || [])].join(' ')
     commands.push(command)
     const config = command.match(/<< 'EOF'\n([\s\S]*?)\n?EOF/)
     if (config) configs.push(config[1])
+    if (typeof input === 'string' && input === 'node' && args[0] === '-e') {
+      configs.push(args.at(-1)!)
+      writes.push(args)
+    }
     let code = 0
     let output = command.includes('which') ? 'claude codex copilot cursor-agent gemini opencode' : ''
     let error = ''
@@ -84,7 +96,7 @@ export function sandboxFixture(
     }
     return { exitCode: code, stdout: async () => output, stderr: async () => error }
   }
-  return { sandbox: { runCommand } as unknown as Sandbox, commands, configs }
+  return { sandbox: { runCommand } as unknown as Sandbox, commands, configs, writes }
 }
 
 export function loggerFixture() {
@@ -289,6 +301,143 @@ test(
         consumed,
       )
       if (mode === 'normal') assert.ok(result.agentResponse?.includes('https://example.org/docs'))
+    }
+  },
+)
+
+test('MCP refresh preserves native settings, manual disable choices and invalid existing files', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'mcp-settings-'))
+  const location = join(directory, 'settings.json')
+  const native = { url: 'https://native.example/mcp', headers: { Authorization: 'fixture-native-secret' } }
+  const defaultServer = { url: PARALLEL_SEARCH_URL, headers: parallelSearchHeaders(PARALLEL_SEARCH_URL) }
+  const execute = promisify(execFile)
+  const localSandbox = {
+    runCommand: async (cmd: string, args: string[]) => {
+      try {
+        const result = await execute(cmd, args)
+        return { exitCode: 0, stdout: async () => result.stdout, stderr: async () => result.stderr }
+      } catch {
+        return { exitCode: 1, stdout: async () => '', stderr: async () => '' }
+      }
+    },
+  } as unknown as Sandbox
+  try {
+    for (const field of ['mcpServers', 'mcp'] as const) {
+      const original = { permissions: { network: 'ask' }, model: 'saved-model', [field]: { native } }
+      await writeFile(location, JSON.stringify(original))
+      await rm(`${location}.coding-agent-template.json`, { force: true })
+      const config = { [field]: { 'parallel-search': defaultServer } }
+      assert.equal((await writeMcpConfiguration(localSandbox, location, config, field)).success, true)
+      let saved = JSON.parse(await readFile(location, 'utf8'))
+      assert.deepEqual(saved.permissions, original.permissions)
+      assert.deepEqual(saved[field].native, native)
+      assert.equal(saved[field]['parallel-search'].url, PARALLEL_SEARCH_URL)
+      assert.equal((await writeMcpConfiguration(localSandbox, location, { [field]: {} }, field)).success, true)
+      saved = JSON.parse(await readFile(location, 'utf8'))
+      assert.deepEqual(saved, original)
+      await writeMcpConfiguration(localSandbox, location, config, field)
+      saved = JSON.parse(await readFile(location, 'utf8'))
+      saved[field]['parallel-search'].enabled = false
+      await writeFile(location, JSON.stringify(saved))
+      await writeMcpConfiguration(localSandbox, location, { [field]: {} }, field)
+      await writeMcpConfiguration(localSandbox, location, config, field)
+      assert.deepEqual(JSON.parse(await readFile(location, 'utf8')), saved)
+    }
+    await writeFile(location, 'invalid existing configuration')
+    assert.equal(
+      (await writeMcpConfiguration(localSandbox, location, { mcpServers: { 'parallel-search': defaultServer } }))
+        .success,
+      false,
+    )
+    assert.equal(await readFile(location, 'utf8'), 'invalid existing configuration')
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('a local Claude connector can retain a remote URL without losing its command', async () => {
+  const fixture = sandboxFixture()
+  const { logger } = loggerFixture()
+  await installClaudeCLI(fixture.sandbox, logger, undefined, [
+    { ...connector, type: 'local', command: 'npx fixture-mcp' },
+  ])
+  assert.ok(
+    fixture.commands.some((command) => command.includes('claude mcp add') && command.includes('npx fixture-mcp')),
+  )
+})
+
+test(
+  'OpenCode discovers MCP from the adapter global path and respects a manual disable',
+  { skip: !process.env.OPENCODE_BIN, timeout: 60000 },
+  async () => {
+    const home = await mkdtemp(join(tmpdir(), 'opencode-mcp-'))
+    const requests: Array<{ method: string; userAgent?: string }> = []
+    const server = createServer(async (request, response) => {
+      if (request.method !== 'POST') {
+        response.writeHead(405).end()
+        return
+      }
+      let raw = ''
+      for await (const chunk of request) raw += chunk
+      const body = JSON.parse(raw)
+      requests.push({ method: body.method, userAgent: request.headers['user-agent'] })
+      if (body.id === undefined) {
+        response.writeHead(202).end()
+        return
+      }
+      const result =
+        body.method === 'initialize'
+          ? {
+              protocolVersion: body.params.protocolVersion,
+              capabilities: { tools: {} },
+              serverInfo: { name: 'fixture', version: '1' },
+            }
+          : { tools: [] }
+      response
+        .writeHead(200, { 'Content-Type': 'application/json' })
+        .end(JSON.stringify({ jsonrpc: '2.0', id: body.id, result }))
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address()
+    assert.ok(address && typeof address !== 'string')
+    const fixture = sandboxFixture()
+    const { logger } = loggerFixture()
+    await executeOpenCodeInSandbox(fixture.sandbox, 'Read docs', logger, undefined, [connector])
+    const write = fixture.writes[0]
+    assert.equal(write[2], '~/.config/opencode/opencode.json')
+    assert.ok(write[4].includes(PARALLEL_SEARCH_URL))
+    const args = [...write]
+    args[4] = args[4].replace(PARALLEL_SEARCH_URL, `http://127.0.0.1:${address.port}/mcp`)
+    const env = {
+      PATH: process.env.PATH,
+      HOME: home,
+      NODE_ENV: 'test' as const,
+      XDG_CONFIG_HOME: join(home, '.config'),
+      XDG_DATA_HOME: join(home, '.local/share'),
+      XDG_CACHE_HOME: join(home, '.cache'),
+      OPENCODE_DISABLE_MODELS_FETCH: 'true',
+      OPENCODE_DISABLE_DEFAULT_PLUGINS: 'true',
+    }
+    const execute = promisify(execFile)
+    try {
+      await execute('node', args, { env })
+      const result = await execute(process.env.OPENCODE_BIN!, ['mcp', 'list'], { env, cwd: home, timeout: 20000 })
+      assert.ok(/connected/i.test(result.stdout), result.stdout + result.stderr)
+      assert.ok(requests.some((request) => request.method === 'initialize'))
+      assert.ok(requests.every((request) => request.userAgent === 'coding-agent-template/2.0.0'))
+      const location = join(home, '.config/opencode/opencode.json')
+      const config = JSON.parse(await readFile(location, 'utf8'))
+      config.mcp['parallel-search'].enabled = false
+      await writeFile(location, JSON.stringify(config))
+      const count = requests.length
+      await execute('node', args, { env })
+      await execute(process.env.OPENCODE_BIN!, ['mcp', 'list'], { env, cwd: home, timeout: 20000 })
+      assert.equal(requests.length, count)
+      assert.equal(JSON.parse(await readFile(location, 'utf8')).mcp['parallel-search'].enabled, false)
+    } finally {
+      server.closeAllConnections()
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+      await rm(home, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 })
     }
   },
 )

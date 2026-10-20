@@ -1,3 +1,4 @@
+import { writeMcpConfiguration } from '../mcp-config'
 import { parallelSearchHeaders } from '@/lib/connectors/parallel-search'
 import { Sandbox } from '@vercel/sandbox'
 import { runCommandInSandbox, runInProject, PROJECT_DIR } from '../commands'
@@ -213,25 +214,30 @@ export async function executeOpenCodeInSandbox(
         }
       }
 
-      // Write the opencode.json file to the OpenCode config directory (not project directory)
-      const opencodeConfigJson = JSON.stringify(opencodeConfig, null, 2)
-      const createConfigCmd = `mkdir -p ~/.opencode && cat > ~/.opencode/config.json << 'EOF'
-${opencodeConfigJson}
-EOF`
-
-      await logger.info('Creating OpenCode MCP configuration file...')
-      const configResult = await runCommandInSandbox(sandbox, 'sh', ['-c', createConfigCmd])
+      // Merge current app connectors while preserving native settings and user edits.
+      const configResult = await writeMcpConfiguration(
+        sandbox,
+        '~/.config/opencode/opencode.json',
+        opencodeConfig,
+        'mcp',
+      )
 
       if (configResult.success) {
-        await logger.info('OpenCode configuration file (~/.opencode/config.json) created successfully')
+        await logger.info('OpenCode configuration file (~/.config/opencode/opencode.json) created successfully')
 
         // Verify the file was created (without logging sensitive contents)
-        const verifyConfig = await runCommandInSandbox(sandbox, 'test', ['-f', '~/.opencode/config.json'])
+        const verifyConfig = await runCommandInSandbox(sandbox, 'test', ['-f', '~/.config/opencode/opencode.json'])
         if (verifyConfig.success) {
           await logger.info('OpenCode MCP configuration verified')
         }
       } else {
-        await logger.info('Warning: Failed to create OpenCode configuration file')
+        await logger.error('Failed to refresh MCP configuration')
+        return {
+          success: false,
+          error: 'Failed to refresh MCP configuration',
+          cliName: 'opencode',
+          changesDetected: false,
+        }
       }
     }
 

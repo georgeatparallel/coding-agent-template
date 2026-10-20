@@ -13,3 +13,7 @@ disabled MCP and process cancellation. It requires no model API key. The
 PostgreSQL and native Codex cases report skips unless their respective variables
 are set. Adapter configuration tests cover all six CLIs; native process tests
 exercise Codex.
+
+Set `OPENCODE_BIN` to a separately installed `opencode-ai` executable to verify
+the actual global configuration loader and a manually disabled MCP entry. This
+uses a local MCP HTTP fixture and no inference provider.

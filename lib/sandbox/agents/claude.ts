@@ -105,7 +105,7 @@ export async function installClaudeCLI(
 
           // Parallel is supplied per execution below, so disconnecting it also
           // takes effect in a resumed sandbox without leaving a saved server.
-          if (Object.keys(parallelSearchHeaders(server.baseUrl)).length > 0) continue
+          if (server.type === 'remote' && Object.keys(parallelSearchHeaders(server.baseUrl)).length > 0) continue
 
           if (server.type === 'local') {
             // Local STDIO server - command string contains both executable and args

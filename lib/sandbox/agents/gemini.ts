@@ -1,3 +1,4 @@
+import { writeMcpConfiguration } from '../mcp-config'
 import { parallelSearchHeaders } from '@/lib/connectors/parallel-search'
 import { Sandbox } from '@vercel/sandbox'
 import { runCommandInSandbox, runInProject, PROJECT_DIR } from '../commands'
@@ -149,14 +150,8 @@ export async function executeGeminiInSandbox(
         }
       }
 
-      // Write the settings.json file to ~/.gemini/
-      const settingsJson = JSON.stringify(settingsConfig, null, 2)
-      const createSettingsCmd = `mkdir -p ~/.gemini && cat > ~/.gemini/settings.json << 'EOF'
-${settingsJson}
-EOF`
-
-      await logger.info('Creating Gemini MCP settings file...')
-      const settingsResult = await runCommandInSandbox(sandbox, 'sh', ['-c', createSettingsCmd])
+      // Merge current app connectors while preserving native settings and user edits.
+      const settingsResult = await writeMcpConfiguration(sandbox, '~/.gemini/settings.json', settingsConfig)
 
       if (settingsResult.success) {
         await logger.info('Gemini settings.json file created successfully')
@@ -167,7 +162,13 @@ EOF`
           await logger.info('Gemini MCP configuration verified')
         }
       } else {
-        await logger.info('Warning: Failed to create Gemini settings.json file')
+        await logger.error('Failed to refresh MCP configuration')
+        return {
+          success: false,
+          error: 'Failed to refresh MCP configuration',
+          cliName: 'gemini',
+          changesDetected: false,
+        }
       }
     }
 
